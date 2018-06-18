@@ -9,12 +9,18 @@
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
 #include "spline.h"
-#include "map.h"
+#include "modules/map/map.h"
 #include "utility.h"
 #include <ncurses.h>
-#include "classifier.h"
+#include "modules/prediction/classifier.h"
+#include "modules/localization/localization.h"
+#include "modules/sensor_fusion/sensor_fusion.h"
+#include "assert.h"
+#include "modules/Constants.h"
+#include "modules/prediction/prediction.h"
+#include "modules/planning/planning.h"
 
-#define ncurses
+#define ncursesx
 
 using namespace std;
 
@@ -36,59 +42,76 @@ string hasData(string s) {
   return "";
 }
 
-void output_sensor_fusion(vector<vector<double>> sensor_fusion, Map& map, GNB& classifier){
-  /* structure of the sensor fusion input
-   *  id    int,
-   *  x     float,
-   *  y     float,
-   *  vx    float,
-   *  vy    float,
-   *  s     float,
-   *  d     float
-   */
 
+void output_sensor_fusion(vector<SensorFusionMessage> sensor_fusion_msgs, GNB& classifier){
 #ifdef ncurses
   clear();
   string header = "ID\tlane\tx\t\ty\t\tvx\t\tvy\t\ts\t\td\t\ts_dot\t\td_dot\t\tPrediction\n";
   printw(header.c_str());
-  for(int i=0; i<sensor_fusion.size(); ++i) {
-    float theta = atan2(sensor_fusion[i][4], sensor_fusion[i][3]);
-    float speed = sqrt(sensor_fusion[i][4]*sensor_fusion[i][4] + sensor_fusion[i][3]*sensor_fusion[i][3]);
+  for(auto const& message: sensor_fusion_msgs) {
 
-    vector<double> result = map.getFrenet(sensor_fusion[i][1], sensor_fusion[i][2], theta, speed);
-    float s_dot = result[2];
-    float d_dot = result[3];
+    string pred = classifier.Predict({0, message.d, message.s_dot, message.d_dot});
 
-    int lane = float(sensor_fusion[i][6] / 4);
-    string pred = classifier.predict({0, sensor_fusion[i][6], s_dot, d_dot});
-
-    string message = to_string((int)sensor_fusion[i][0]) + "\t" + to_string(lane) + "\t" + to_string(sensor_fusion[i][1]) + "\t"
-                     + to_string(sensor_fusion[i][2]) + "\t" + to_string(sensor_fusion[i][3]) + "\t"
-                     + to_string(sensor_fusion[i][4]) + "\t" + to_string(sensor_fusion[i][5]) + "\t"
-                     + to_string(sensor_fusion[i][6]) + "\t" + to_string(s_dot) + "\t" + to_string(d_dot)
+    string str_message = to_string(message.id) + "\t" + to_string(message.lane) + "\t" + to_string(message.x) + "\t"
+                     + to_string(message.y) + "\t" + to_string(message.vx) + "\t"
+                     + to_string(message.vy) + "\t" + to_string(message.s) + "\t"
+                     + to_string(message.d) + "\t" + to_string(message.s_dot) + "\t" + to_string(message.d_dot)
                      + "\t" + pred + "\n";
-    printw(message.c_str());
+    printw(str_message.c_str());
   }
   refresh();
 #endif
 }
 
-void init_classifier(GNB& classifier) {
-  vector<string> possible_vector = {"CLL","KL","CLR"};
+void output_debug_prediction(int counter, LocalizationEstimate estimate,
+                             vector<double> next_val_x,
+                             vector<double> next_val_y,
+                             vector<PredictionEstimate> prediction){
+  string output_dir= "/home/tom/GitProjects/CarND-Path-Planning-Project/debug/";
+  string filename;
+  stringstream ss;
+  ss << setfill('0') << setw(5) << counter << ".txt";
+  ss >> filename;
+  ofstream debug_file;
+  debug_file.open(output_dir + filename);
 
-  vector<double> piror = {0.285, 0.421, 0.293};
+  int step = ceil(planning_time_length / trajectory_discretize_timestep);
 
-  vector<vector<double>> mean_list;
-  mean_list.push_back({19.714, 5.052, 9.914, -0.967});
-  mean_list.push_back({20.324, 3.680, 9.999, 0.006});
-  mean_list.push_back({19.477, 2.934, 9.947, 0.954});
+  for(int i=0; i<step; ++i){
+    debug_file << next_val_x[i] - estimate.x << "\t" << next_val_y[i] - estimate.y << "\t";
+    for(int j=0; j<prediction.size(); ++j){
+      debug_file << prediction[j].trajectory.path_point_list[i].x - estimate.x << "\t"
+                 << prediction[j].trajectory.path_point_list[i].y - estimate.y << "\t";
+    }
+    debug_file << "\n";
+  }
 
-  vector<vector<double>> std_dev_list;
-  std_dev_list.push_back({12.290, 2.360, 0.990, 0.663});
-  std_dev_list.push_back({11.436, 3.404, 1.069, 0.168});
-  std_dev_list.push_back({12.085, 2.312, 0.952, 0.647});
+  debug_file.close();
+}
 
-  classifier.load(possible_vector, mean_list, std_dev_list, piror);
+void output_debug_prediction(int counter, LocalizationEstimate estimate,
+                             Trajectory trajectory,
+                             vector<PredictionEstimate> prediction){
+  string output_dir= "/home/tom/GitProjects/CarND-Path-Planning-Project/debug/";
+  string filename;
+  stringstream ss;
+  ss << setfill('0') << setw(5) << counter << ".txt";
+  ss >> filename;
+  ofstream debug_file;
+  debug_file.open(output_dir + filename);
+
+  int step = ceil(planning_time_length / trajectory_discretize_timestep);
+
+  for(int i=0; i<step; ++i){
+    debug_file << trajectory.path_point_list[i].x - estimate.x << "\t" << trajectory.path_point_list[i].y - estimate.y << "\t";
+    for(int j=0; j<prediction.size(); ++j){
+      debug_file << prediction[j].trajectory.path_point_list[i].x - estimate.x << "\t"
+                 << prediction[j].trajectory.path_point_list[i].y - estimate.y << "\t";
+    }
+    debug_file << "\n";
+  }
+
+  debug_file.close();
 }
 
 int main() {
@@ -100,17 +123,17 @@ int main() {
 #endif
 
   string map_file_ = "../data/highway_map.csv";
-  Map map(map_file_);
-  GNB classifier;
-  init_classifier(classifier);
-
   // The max s value before wrapping around the track back to 0
   double max_s = 6945.554;
+  Map map(map_file_, max_s, 3);
+  Prediction prediction(&map);
+  Planning planning(&map);
 
-  int lane = 1;
+  int lane_id = 1;
   double ref_vel = 0;
+  int counter = 0;
 
-  h.onMessage([&map, &lane, &ref_vel, &classifier](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+  h.onMessage([&map, &lane_id, &ref_vel, &prediction, &planning, &counter](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
@@ -119,7 +142,12 @@ int main() {
     //cout << sdata << endl;
     if (length && length > 2 && data[0] == '4' && data[1] == '2') {
 
+      std::clock_t start;
+      start = std::clock();
+      counter++;
+
       auto s = hasData(data);
+      Lane lane = map.GetLane(lane_id);
 
       if (s != "") {
         auto j = json::parse(s);
@@ -128,58 +156,143 @@ int main() {
         
         if (event == "telemetry") {
           // j[1] is the data JSON object
-          
+
+          LocalizationEstimate local_estimate;
+
         	// Main car's localization Data
-          double car_x = j[1]["x"];
-          double car_y = j[1]["y"];
-          double car_s = j[1]["s"];
-          double car_d = j[1]["d"];
-          double car_yaw = j[1]["yaw"];
-          double car_speed = j[1]["speed"];
+          local_estimate.x = j[1]["x"];
+          local_estimate.y = j[1]["y"];
+          local_estimate.s = j[1]["s"];
+          local_estimate.d = j[1]["d"];
+          local_estimate.yaw = j[1]["yaw"];
+          local_estimate.speed = j[1]["speed"];
 
           // Previous path data given to the Planner
-          auto previous_path_x = j[1]["previous_path_x"];
-          auto previous_path_y = j[1]["previous_path_y"];
+          local_estimate.previous_path_x.clear();
+          local_estimate.previous_path_y.clear();
+          for(auto d : j[1]["previous_path_x"])
+            local_estimate.previous_path_x.push_back(d);
+          for(auto d: j[1]["previous_path_y"])
+            local_estimate.previous_path_y.push_back(d);
+
           // Previous path's end s and d values
-          double end_path_s = j[1]["end_path_s"];
-          double end_path_d = j[1]["end_path_d"];
+          local_estimate.end_path_s = j[1]["end_path_s"];
+          local_estimate.end_path_d = j[1]["end_path_d"];
+
+          if(local_estimate.previous_path_x.size() >= 2) {
+            //finish the calculation properties
+            vector<double> next_frenet_0 = map.GetFrenet(local_estimate.previous_path_x[0],
+                                                         local_estimate.previous_path_y[0],
+                                                         atan2(local_estimate.previous_path_y[1] -
+                                                               local_estimate.previous_path_y[0],
+                                                               local_estimate.previous_path_x[1] -
+                                                               local_estimate.previous_path_x[0]));
+            vector<double> next_frenet_1 = map.GetFrenet(local_estimate.previous_path_x[1],
+                                                         local_estimate.previous_path_y[1],
+                                                         atan2(local_estimate.previous_path_y[2] -
+                                                               local_estimate.previous_path_y[1],
+                                                               local_estimate.previous_path_x[2] -
+                                                               local_estimate.previous_path_x[1]));
+
+            float vx_t0 = (local_estimate.previous_path_x[0] - local_estimate.x) / trajectory_discretize_timestep;
+            float vx_t1 = (local_estimate.previous_path_x[1] - local_estimate.previous_path_x[0]) / trajectory_discretize_timestep;
+
+            float vy_t0 = (local_estimate.previous_path_y[0] - local_estimate.y) / trajectory_discretize_timestep;;
+            float vy_t1 = (local_estimate.previous_path_y[1] - local_estimate.previous_path_y[0]) / trajectory_discretize_timestep;;
+
+            float s_dot_t0 = (next_frenet_0[0] - local_estimate.s) / trajectory_discretize_timestep;
+            float s_dot_t1 = (next_frenet_1[0] - next_frenet_0[0]) / trajectory_discretize_timestep;
+
+            float d_dot_t0 = (next_frenet_0[1] - local_estimate.d) / trajectory_discretize_timestep;
+            float d_dot_t1 = (next_frenet_1[1] - next_frenet_0[1]) / trajectory_discretize_timestep;
+
+            local_estimate.ax = (vx_t1 - vx_t0) / trajectory_discretize_timestep;
+            local_estimate.ay = (vy_t1 - vy_t0) / trajectory_discretize_timestep;
+
+            local_estimate.s_dot = s_dot_t0;
+            local_estimate.d_dot = d_dot_t0;
+            local_estimate.s_dot2 = (s_dot_t1 - s_dot_t0) / trajectory_discretize_timestep;
+            local_estimate.d_dot2 = (d_dot_t1 - d_dot_t0) / trajectory_discretize_timestep;
+          }
+          else{
+            local_estimate.ax = 0;
+            local_estimate.ay = 0;
+            local_estimate.s_dot = 0;
+            local_estimate.d_dot = 0;
+            local_estimate.s_dot2 = 0;
+            local_estimate.d_dot2 = 0;
+          }
+
 
           // Sensor Fusion Data, a list of all other cars on the same side of the road.
           auto sensor_fusion_raw = j[1]["sensor_fusion"];
 
-          vector<vector<double>> sensor_fusion;
+          vector<SensorFusionMessage> sensor_fusion_messages;
           for(int i=0; i<sensor_fusion_raw.size(); ++i){
-            vector<double> sensor_fusion_row;
-            for(int j=0; j<7; ++j)
-              sensor_fusion_row.push_back(sensor_fusion_raw[i][j]);
+            SensorFusionMessage message;
 
-            sensor_fusion.push_back(sensor_fusion_row);
+            message.id = sensor_fusion_raw[i][0];
+            message.x = sensor_fusion_raw[i][1];
+            message.y = sensor_fusion_raw[i][2];
+            message.vx = sensor_fusion_raw[i][3];
+            message.vy = sensor_fusion_raw[i][4];
+            message.s = sensor_fusion_raw[i][5];
+            message.d = sensor_fusion_raw[i][6];
+
+            float theta = atan2(message.vy, message.vx);
+            float speed = sqrt(message.vy*message.vy + message.vx*message.vx);
+
+            //In this simple model, s_dot should be ~= speed and d_dot should be = 0, as cars don't change lane.
+            vector<double> result = map.GetFrenet(message.x, message.y, theta, speed);
+
+            float sanity_s = fabs(message.s - result[0]) / message.s;
+            float sanity_d = fabs(message.d - result[1]) / message.d;
+
+            /*
+            if(sanity_s > 1e-1 || sanity_d > 1e-1)
+              cout << "Sanity check ?? " << sanity_s << " " << sanity_d << endl;
+              */
+
+            message.s_dot = result[2];
+            message.d_dot = result[3];
+            message.yaw = theta;
+
+            message.lane = message.d / 4;
+
+            sensor_fusion_messages.push_back(message);
           }
 
-          output_sensor_fusion(sensor_fusion, map, classifier);
+          vector<PredictionEstimate> predictions;
+          prediction.PredictVehiclesTrajectory(sensor_fusion_messages, predictions);
 
-          int prev_size = previous_path_x.size();
+          //do nothing here
+          planning.UpdateLocalization(local_estimate);
+          planning.UpdatePrediction(sensor_fusion_messages, predictions);
+
+          Trajectory trajectory = planning.PlanTrajectory();
+
+          int prev_size = local_estimate.previous_path_x.size();
+
+          double car_s = local_estimate.s;
 
           if(prev_size > 0){
-            car_s = end_path_s;
+            car_s = local_estimate.end_path_s;
           }
 
           bool too_close = false;
 
           //find ref_v to use
-          for(int i=0; i<sensor_fusion.size(); ++i){
+          for(auto const& message: sensor_fusion_messages){
             //car is in my lane
-            float d = sensor_fusion[i][6];
-            if(d < (2+4*lane+2) && d>(2+4*lane-2)){
-              double vx = sensor_fusion[i][3];
-              double vy = sensor_fusion[i][4];
-              double check_speed = sqrt(vx*vx+vy*vy);
-              double check_car_s = sensor_fusion[i][5];
+            float d = message.d;
+            if(d < lane.lane_right_d && d>lane.lane_left_d){
+              double check_speed = sqrt(message.vx*message.vx+message.vy*message.vy);
+              double check_car_s = message.s;
 
-              check_car_s+=((double) prev_size*.02* check_speed); //if using previous points can project s value out
+              check_car_s+=((double) prev_size* trajectory_discretize_timestep * check_speed); //if using previous points can project s value out
 
               //check s values greater than mine and s gap
-              if((check_car_s > car_s) && ((check_car_s - car_s) < 30))
+              if((check_car_s > car_s) && ((check_car_s - car_s) < planning_safe_follow_distance))
               {
 
                 //Do some logic here, lower reference velocity so we don't crash into the car infront of us
@@ -187,17 +300,17 @@ int main() {
                 //ref_vel = 29.5;
 
                 too_close= true;
-                if(lane > 0)
-                  lane = 0;
+                if(lane_id > 0)
+                  lane_id = 0;
               }
             }
           }
 
           if(too_close){
-            ref_vel -= .224;
+            ref_vel -= vehicle_normal_acceleration * trajectory_discretize_timestep;
           }
-          else if (ref_vel < 49.5){
-            ref_vel += .224;
+          else if (ref_vel < vehicle_speed_limit){
+            ref_vel += vehicle_normal_acceleration * trajectory_discretize_timestep;
           }
 
           json msgJson;
@@ -212,7 +325,7 @@ int main() {
           for(int i=0; i<50; ++i) {
             double next_s = car_s + (i+1)*dist_inc;
             double next_d = 6;
-            vector<double> xy=getXY(next_s, next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            vector<double> xy=GetXY(next_s, next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
             next_x_vals.push_back(xy[0]);
             next_y_vals.push_back(xy[1]);
           }*/
@@ -220,26 +333,26 @@ int main() {
           vector<double> ptsx;
           vector<double> ptsy;
 
-          double ref_x = car_x;
-          double ref_y = car_y;
-          double ref_yaw = deg2rad(car_yaw);
+          double ref_x = local_estimate.x;
+          double ref_y = local_estimate.y;
+          double ref_yaw = deg2rad(local_estimate.yaw);
 
           if(prev_size < 2){
-            double prev_car_x = car_x - cos(car_yaw);
-            double prev_car_y = car_y - sin(car_yaw);
+            double prev_car_x = local_estimate.x - cos(local_estimate.yaw);
+            double prev_car_y = local_estimate.y - sin(local_estimate.yaw);
 
             ptsx.push_back(prev_car_x);
-            ptsx.push_back(car_x);
+            ptsx.push_back(local_estimate.x);
 
             ptsy.push_back(prev_car_y);
-            ptsy.push_back(car_y);
+            ptsy.push_back(local_estimate.y);
           }
           else{
-            ref_x = previous_path_x[prev_size-1];
-            ref_y = previous_path_y[prev_size-1];
+            ref_x = local_estimate.previous_path_x[prev_size-1];
+            ref_y = local_estimate.previous_path_y[prev_size-1];
 
-            double ref_x_prev = previous_path_x[prev_size-2];
-            double ref_y_prev = previous_path_y[prev_size-2];
+            double ref_x_prev = local_estimate.previous_path_x[prev_size-2];
+            double ref_y_prev = local_estimate.previous_path_y[prev_size-2];
             ref_yaw = atan2(ref_y-ref_y_prev, ref_x-ref_x_prev);
 
             ptsx.push_back(ref_x_prev);
@@ -249,9 +362,9 @@ int main() {
             ptsy.push_back(ref_y);
           }
 
-          vector<double> next_wp0 = map.getXY(car_s + 30, (2+4*lane));
-          vector<double> next_wp1 = map.getXY(car_s + 60, (2+4*lane));
-          vector<double> next_wp2 = map.getXY(car_s + 90, (2+4*lane));
+          vector<double> next_wp0 = map.GetXY(car_s + 30, lane.lane_center_d);
+          vector<double> next_wp1 = map.GetXY(car_s + 60, lane.lane_center_d);
+          vector<double> next_wp2 = map.GetXY(car_s + 90, lane.lane_center_d);
 
           ptsx.push_back(next_wp0[0]);
           ptsx.push_back(next_wp1[0]);
@@ -262,46 +375,60 @@ int main() {
           ptsy.push_back(next_wp2[1]);
 
           for(int i=0; i<ptsx.size(); ++i){
+            /*
             double shift_x = ptsx[i] - ref_x;
             double shift_y = ptsy[i] - ref_y;
 
             ptsx[i] = (shift_x*cos(0-ref_yaw)-shift_y*sin(0-ref_yaw));
             ptsy[i] = (shift_x*sin(0-ref_yaw)+shift_y*cos(0-ref_yaw));
+            */
+
+            double x_dash, y_dash;
+
+            ConvertXYToVehicleCoordination(ptsx[i], ptsy[i], ref_x, ref_y, ref_yaw, x_dash, y_dash);
+
+            ptsx[i] = x_dash;
+            ptsy[i] = y_dash;
+
           }
 
           tk::spline s;
 
           s.set_points(ptsx, ptsy);
 
-          for(int i=0; i<previous_path_x.size(); ++i){
-            next_x_vals.push_back(previous_path_x[i]);
-            next_y_vals.push_back(previous_path_y[i]);
+          for(int i=0; i<local_estimate.previous_path_x.size(); ++i){
+            next_x_vals.push_back(local_estimate.previous_path_x[i]);
+            next_y_vals.push_back(local_estimate.previous_path_y[i]);
           }
 
-          double target_x = 30.0;
+          double target_x = ref_vel * 1.0;
           double target_y = s(target_x);
           double target_dist = sqrt(target_x*target_x + target_y*target_y);
           double x_add_on = 0;
 
-          for(int i=1; i<=50-previous_path_x.size(); ++i){
-            double N = (target_dist / .02 / ref_vel * 2.24);
-            double x_point = x_add_on + (target_x)/N;
-            double y_point = s(x_point);
 
-            x_add_on = x_point;
+          for(int i=1; i<=50-local_estimate.previous_path_x.size(); ++i){
+            double N = (target_dist / trajectory_discretize_timestep / ref_vel);
 
-            double x_ref = x_point;
-            double y_ref = y_point;
+            double x_point, y_point, x_dash, y_dash;
 
-            //car -> global coordination
-            x_point = (x_ref * cos(ref_yaw)-y_ref*sin(ref_yaw));
-            y_point = (x_ref * sin(ref_yaw)+y_ref*cos(ref_yaw));
+            x_dash = x_add_on + (target_x)/N;
+            y_dash = s(x_dash);
+            x_add_on = x_dash;
 
-            x_point += ref_x;
-            y_point += ref_y;
+            ConvertVehicleCoordinateToXY(x_dash, y_dash, ref_x, ref_y, ref_yaw, x_point, y_point);
 
             next_x_vals.push_back(x_point);
             next_y_vals.push_back(y_point);
+          }
+
+          //debug trajectory start
+          next_x_vals.clear();
+          next_y_vals.clear();
+
+          for(int i=0; i<trajectory.path_point_list.size(); ++i){
+            next_x_vals.push_back(trajectory.path_point_list[i].x);
+            next_y_vals.push_back(trajectory.path_point_list[i].y);
           }
 
           msgJson["next_x"] = next_x_vals;
@@ -311,7 +438,11 @@ int main() {
 
           //this_thread::sleep_for(chrono::milliseconds(1000));
           ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
-          
+
+          //debug prediction
+          //output_debug_prediction(counter, local_estimate, trajectory, predictions);
+
+          std::cout << "Time: " << (std::clock() - start) / (double)(CLOCKS_PER_SEC / 1000) << " ms" << std::endl;
         }
       } else {
         // Manual driving

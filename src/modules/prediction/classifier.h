@@ -24,19 +24,19 @@ public:
    */
   virtual ~GNB();
 
-  void train(vector<vector<double> > data, vector<string>  labels);
+  void Train(vector<vector<double> > data, vector<string> labels);
 
-  void load(vector<string> labels, vector<vector<double>> means, vector<vector<double>> std_devs, vector<double> prior);
+  void Load(vector<string> labels, vector<vector<double>> means, vector<vector<double>> std_devs, vector<double> prior);
 
-  string predict(vector<double>);
+  string Predict(vector<double>);
 
-  string predict_detail(vector<double>);
+  string PredictDetail(vector<double>);
 
 private:
   double** means;
   double** std_devs;
   double* pirors;
-  void reset();
+  void Reset();
 };
 
 #endif

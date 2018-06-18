@@ -19,10 +19,10 @@ GNB::GNB() {
 }
 
 GNB::~GNB() {
-  reset();
+  Reset();
 }
 
-void GNB::reset()
+void GNB::Reset()
 {
   if(means != 0){
     for(int i=0; i<possible_labels.size(); ++i)
@@ -40,7 +40,7 @@ void GNB::reset()
   means = 0; std_devs = 0; pirors=0;
 }
 
-void GNB::train(vector<vector<double>> data, vector<string> labels)
+void GNB::Train(vector<vector<double>> data, vector<string> labels)
 {
 
   /*
@@ -60,7 +60,7 @@ void GNB::train(vector<vector<double>> data, vector<string> labels)
       - Each label is one of "left", "keep", or "right".
   */
 
-  reset();
+  Reset();
 
   int attribute_len = data[0].size();
   int num_labels = possible_labels.size();
@@ -117,7 +117,7 @@ void GNB::train(vector<vector<double>> data, vector<string> labels)
     */
 }
 
-string GNB::predict(vector<double> sample)
+string GNB::Predict(vector<double> sample)
 {
   /*
     Once trained, this method is called and expected to return
@@ -169,7 +169,7 @@ string GNB::predict(vector<double> sample)
 
 }
 
-string GNB::predict_detail(vector<double> sample)
+string GNB::PredictDetail(vector<double> sample)
 {
   int attribute_len = sample.size();
   int num_labels = possible_labels.size();
@@ -207,7 +207,8 @@ string GNB::predict_detail(vector<double> sample)
 
 }
 
-void GNB::load(vector<string> labels, vector<vector<double>> mean_list, vector<vector<double>> std_dev_list, vector<double> prior_list)
+void GNB::Load(vector<string> labels, vector<vector<double>> mean_list, vector<vector<double>> std_dev_list,
+               vector<double> prior_list)
 {
   this->possible_labels = labels;
 

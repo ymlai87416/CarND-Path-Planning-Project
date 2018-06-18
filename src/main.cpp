@@ -336,6 +336,14 @@ int main() {
           vector<double> next_wp1 = getXY(car_s + 60, (2+4*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
           vector<double> next_wp2 = getXY(car_s + 90, (2+4*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
 
+          /*
+          cout << "CP " << next_wp0[0] << " " << next_wp0[1]
+               << " " << next_wp1[0] << " " << next_wp1[1]
+               << " " << next_wp2[0] << " " << next_wp2[1]
+               << endl;*/
+
+          cout << ref_x << " " << ref_y << " " << ref_yaw << endl;
+
           ptsx.push_back(next_wp0[0]);
           ptsx.push_back(next_wp1[0]);
           ptsx.push_back(next_wp2[0]);

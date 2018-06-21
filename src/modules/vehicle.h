@@ -5,6 +5,7 @@
 #include <vector>
 #include <map>
 #include <string>
+#include "Constants.h"
 
 using namespace std;
 
@@ -46,6 +47,14 @@ public:
   string state;
   int target_lane;
   string debug_state;
+
+  float x;
+  float y;
+  float yaw;
+
+  float target_s;
+  float target_v;
+  float target_a;
 
   vector<PathPoint> path_point_list;
 };

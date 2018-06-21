@@ -6,6 +6,8 @@
 #include "../Constants.h"
 #include <sstream>
 #include "../../Eigen-3.3/Eigen/Dense"
+#include "../../spline.h"
+#include "../../utility.h"
 
 using Eigen::MatrixXd;
 using Eigen::VectorXd;
@@ -22,42 +24,53 @@ Planning::~Planning()
 
 }
 
-void Planning::UpdateLocalization(LocalizationEstimate estimate)
+void Planning::OnLocalizationUpdate(LocalizationEstimate const& estimate)
 {
+  this->prev_estimate_snapshot = this->local_estimate_snapshot;
   this->local_estimate_snapshot = estimate;
 }
 
-void Planning::UpdatePrediction(vector<SensorFusionMessage> vehicle_list, vector<PredictionEstimate> vehicle_trajectories)
+void Planning::OnPredictionUpdate(vector<SensorFusionMessage> const& vehicle_list,
+                                  vector<PredictionEstimate> const& vehicle_trajectories)
 {
   this->vehicle_list_snapshot = vehicle_list;
   this->predict_trajectory_snapshot = vehicle_trajectories;
 }
 
-Trajectory Planning::PlanTrajectory()
+PlanningResult Planning::PlanTrajectory()
 {
-  Trajectory result;
+  PlanningResult result;
 
+  //LocalizationEstimate estimate = this->local_estimate_snapshot;
   LocalizationEstimate estimate = this->local_estimate_snapshot;
   vector<SensorFusionMessage> vehicle_list = this->vehicle_list_snapshot;
   vector<PredictionEstimate> predictions = this->predict_trajectory_snapshot;
 
-  vector<string> states = GetSuccessorStates(estimate);
-  float cost;
+  if(!IsCurrentTrackSafe(estimate, predictions)){
+    //if current track is not safe, replan the track by shorten the future track to 5.
+    estimate.previous_path_x.resize(5);
+    estimate.previous_path_y.resize(5);
+    target_lane = map->GetLaneByLateralCoord(estimate.d).lane_id;
+    cout << "Track is not safe, replan the track!!" << endl;
+  }
+
+  vector<string> states = GetSuccessorStates(target_lane);
   vector<float> costs;
   vector<string> final_states;
   vector<Trajectory> final_trajectories;
 
-  //convert CLL / CLR to KL if the lane change is successful
-  if(target_lane == map->GetLaneByLateralCoord(estimate.d).lane_id)
-    state = "KL";
-
   for (vector<string>::iterator it = states.begin(); it != states.end(); ++it) {
+    TrajectoryCost traj_cost;
+    traj_cost.state = *it;
+
     Trajectory trajectory = GenerateTrajectory(*it, estimate, vehicle_list);
     if (trajectory.path_point_list.size() != 0) {
-      cost = CalculateCost(trajectory, predictions);
-      costs.push_back(cost);
+      traj_cost.total_score = CalculateCost(trajectory, vehicle_list, predictions, traj_cost.sub_score);
+      costs.push_back(traj_cost.total_score);
       final_trajectories.push_back(trajectory);
     }
+
+    result.cost.push_back(traj_cost);
   }
 
   vector<float>::iterator best_cost = min_element(begin(costs), end(costs));
@@ -67,38 +80,136 @@ Trajectory Planning::PlanTrajectory()
   state = final_trajectories[best_idx].state;
   target_lane = final_trajectories[best_idx].target_lane;
 
-  return final_trajectories[best_idx];
+  //cout << "Best trajectory found: state: " << state << " lane: " << target_lane << endl;
+
+  result.best_trajectory = final_trajectories[best_idx];
+
+  return result;
 }
 
-vector<float> Planning::GetKinematics(LocalizationEstimate const& estimate, vector<SensorFusionMessage> const& vehicle_list, int lane)
+
+vector<float> Planning::GetKinematics(VehicleState const& estimate,
+                                      vector<SensorFusionMessage> const& vehicle_list, int lane)
 {
   float max_velocity_accel_limit = vehicle_max_acceleration * planning_time_length + estimate.speed;
+  float min_velocity_accel_limit = vehicle_max_deceleration * planning_time_length + estimate.speed;
   float new_position;
   float new_velocity;
   float new_accel;
   SensorFusionMessage vehicle_ahead;
   SensorFusionMessage vehicle_behind;
 
-  if (GetVehicleAhead(estimate, vehicle_list, lane, vehicle_ahead)) {
+  if (GetVehicleAhead(estimate.s, vehicle_list, lane, vehicle_ahead)) {
+    float vehicle_ahead_s = vehicle_ahead.s + estimate.relative_time * vehicle_ahead.s_dot;
 
-    if (GetVehicleBehind(estimate, vehicle_list, lane, vehicle_behind)) {
-      new_velocity = vehicle_ahead.s_dot; //must travel at the speed of traffic, regardless of preferred buffer
+    if (GetVehicleBehind(estimate.s, vehicle_list, lane, vehicle_behind)) {
+      float vehicle_behind_s = vehicle_behind.s + estimate.relative_time * vehicle_behind.s_dot;
+
+      //defensive driving, keep 2 second distance in-front and behind, if behind does not make it, compensate in-front.
+      float safety_distance = planning_safe_follow_distance_in_sec * 2 * estimate.speed;
+      safety_distance -= vehicle_behind_s - estimate.s;
+
+      float max_velocity_in_front = ((vehicle_ahead_s - estimate.s - safety_distance)
+                                     - 0.5 * (0) * planning_time_length * planning_time_length) / planning_time_length
+                                    + vehicle_ahead.s_dot ;
+      new_velocity = max(min(min(max_velocity_in_front, max_velocity_accel_limit), vehicle_speed_limit), min_velocity_accel_limit);
+
+      //new_velocity = vehicle_ahead.s_dot; //must travel at the speed of traffic, regardless of preferred buffer
+      //cout << "Cars detected in both front and behind v_front: " << vehicle_ahead.s_dot
+      //     << " v_behind: " << vehicle_behind.s_dot << " v: " << new_velocity << endl;
     } else {
-      float max_velocity_in_front = (vehicle_ahead.s - estimate.s - planning_safe_follow_distance) + vehicle_ahead.s_dot - 0.5 * (0); //? acceleration?
-      new_velocity = min(min(max_velocity_in_front, max_velocity_accel_limit), vehicle_speed_limit);
+      //currently acceleartion is assume to be 0.
+      float safety_distance = planning_safe_follow_distance_in_sec * estimate.speed;
+
+      float max_velocity_in_front = ((vehicle_ahead_s - estimate.s - safety_distance)
+                                    - 0.5 * (0) * planning_time_length * planning_time_length) / planning_time_length
+                                    + vehicle_ahead.s_dot ;
+      new_velocity = max(min(min(max_velocity_in_front, max_velocity_accel_limit), vehicle_speed_limit), min_velocity_accel_limit);
+
+      //cout << "Cars detected in front v_front: " << vehicle_ahead.s_dot << " v: " << new_velocity << endl;
     }
   } else {
     new_velocity = min(max_velocity_accel_limit, vehicle_speed_limit);
+    //cout << "Empty lane: " << new_velocity << endl;
   }
 
-  new_accel = new_velocity - estimate.speed; //Equation: (v_1 - v_0)/t = acceleration
-  new_position = estimate.s + new_velocity + new_accel / 2.0;
+  new_accel = (new_velocity - estimate.speed) / planning_time_length; //Equation: (v_1 - v_0)/t = acceleration
+  new_position = estimate.s + new_velocity * planning_time_length + new_accel / 2.0 * planning_time_length * planning_time_length;
   return{new_position, new_velocity, new_accel};
+}
+
+bool Planning::GetVehicleBehind(float s,vector<SensorFusionMessage> const& vehicle_list,
+                                int target_lane, SensorFusionMessage & rVehicle){
+  int max_s = -1;
+  bool found_vehicle = false;
+  Lane lane= map->GetLane(target_lane);
+
+  SensorFusionMessage temp_vehicle;
+  for (vector<SensorFusionMessage>::const_iterator it = vehicle_list.begin(); it != vehicle_list.end(); ++it) {
+    temp_vehicle = *it;
+
+    float temp_vehicle_s = temp_vehicle.s;
+    if(fabs(temp_vehicle_s - s) > sensor_fusion_range) {
+      double a = temp_vehicle.s + map->max_s - s;
+      double b = s - (temp_vehicle.s - map->max_s);
+
+      if(a < sensor_fusion_range)
+        temp_vehicle_s = temp_vehicle.s + map->max_s;
+      else
+        temp_vehicle_s = temp_vehicle.s - map->max_s;
+    }
+
+    if (temp_vehicle.lane == lane.lane_id && temp_vehicle_s < s && temp_vehicle_s > max_s) {
+      max_s = temp_vehicle_s;
+      rVehicle = temp_vehicle;
+      found_vehicle = true;
+    }
+  }
+  return found_vehicle;
+}
+
+bool Planning::GetVehicleAhead(float s, vector<SensorFusionMessage> const& vehicle_list,
+                               int target_lane, SensorFusionMessage & rVehicle){
+
+  int min_s = 99999999;
+  bool found_vehicle = false;
+  Lane lane=  map->GetLane(target_lane);
+
+  SensorFusionMessage temp_vehicle;
+  for (vector<SensorFusionMessage>::const_iterator it = vehicle_list.begin(); it != vehicle_list.end(); ++it) {
+    temp_vehicle = *it;
+
+    float temp_vehicle_s = temp_vehicle.s;
+    if(fabs(temp_vehicle_s - s) > sensor_fusion_range) {
+      double a = temp_vehicle.s + map->max_s - s;
+      double b = s - (temp_vehicle.s - map->max_s);
+
+      if(a < sensor_fusion_range)
+        temp_vehicle_s = temp_vehicle.s + map->max_s;
+      else
+        temp_vehicle_s = temp_vehicle.s - map->max_s;
+    }
+
+    if (temp_vehicle.lane == lane.lane_id && temp_vehicle_s > s && temp_vehicle_s < min_s) {
+      min_s = temp_vehicle_s;
+      rVehicle = temp_vehicle;
+      found_vehicle = true;
+    }
+  }
+  return found_vehicle;
 }
 
 bool Planning::FeasibilityCheck(Trajectory trajectory)
 {
-  return false;
+  for(int i=0; i<trajectory.path_point_list.size(); ++i){
+    if(trajectory.path_point_list[i].s_dot > vehicle_speed_limit * 1.1)
+      return false;
+    float speed= sqrt(trajectory.path_point_list[i].vx*trajectory.path_point_list[i].vx +
+        trajectory.path_point_list[i].vy * trajectory.path_point_list[i].vx);
+    if(speed > vehicle_speed_limit * 1.1)
+      return false;
+  }
+  return true;
 }
 
 Trajectory Planning::GenerateTrajectory(string state, LocalizationEstimate const& estimate, vector<SensorFusionMessage> const& vehicle_list)
@@ -107,13 +218,13 @@ Trajectory Planning::GenerateTrajectory(string state, LocalizationEstimate const
   if (state.compare("KL") == 0) {
     trajectory = KeepLaneTrajectory(estimate, vehicle_list);
   } else if (state.compare("LCL") == 0){
-    trajectory = LaneChangeTrajectory(estimate, vehicle_list, state, map->GetLaneByLateralCoord(estimate.d).lane_id-1);
+    trajectory = LaneChangeTrajectory(estimate, vehicle_list, state, this->target_lane-1);
   } else if (state.compare("LCR") == 0) {
-    trajectory = LaneChangeTrajectory(estimate, vehicle_list, state, map->GetLaneByLateralCoord(estimate.d).lane_id+1);
+    trajectory = LaneChangeTrajectory(estimate, vehicle_list, state, this->target_lane+1);
   } else if (state.compare("PLCL") == 0){
-    trajectory = PrepLaneChangeTrajectory(estimate, vehicle_list, state, map->GetLaneByLateralCoord(estimate.d).lane_id-1);
+    trajectory = PrepLaneChangeTrajectory(estimate, vehicle_list, state, this->target_lane-1);
   } else if (state.compare("PLCR") == 0) {
-    trajectory = PrepLaneChangeTrajectory(estimate, vehicle_list, state, map->GetLaneByLateralCoord(estimate.d).lane_id+1);
+    trajectory = PrepLaneChangeTrajectory(estimate, vehicle_list, state, this->target_lane+1);
   }
   return trajectory;
 }
@@ -130,52 +241,174 @@ void Planning::FindActualVelocityAndAcceleration(vector<PathPoint>& path_point_l
   }
 }
 
-Trajectory Planning::KeepLaneTrajectory(LocalizationEstimate const& estimate, vector<SensorFusionMessage> const& vehicle_list)
-{
-  Trajectory trajectory;
-  std::ostringstream stringStream;
-  Lane current_lane = map->GetLaneByLateralCoord(estimate.d);
-  stringStream << "Keep Lane" << current_lane.lane_id;
-  trajectory.debug_state = stringStream.str();
-  trajectory.state = "KL";
-  trajectory.target_lane = current_lane.lane_id;
+void __planning__init_state(LocalizationEstimate const& estimate, const Map* const map,
+                            VehicleState& state, vector<double>& ptsx, vector<double>& ptsy){
 
-  vector<float> kinematics = GetKinematics(estimate, vehicle_list, current_lane.lane_id);
+  if(estimate.previous_path_x.size() > 3) {
+    float relative_time = (estimate.previous_path_x.size() - 1) * trajectory_discretize_timestep;
+    auto x_it = estimate.previous_path_x.rbegin();
+    auto y_it = estimate.previous_path_y.rbegin();
+    float dx = *x_it;
+    float dy = *y_it;
+    x_it++;
+    y_it++;
+    float x = *x_it;
+    float y = *y_it;
+    dx -= x;
+    dy -= y;
+    float yaw = atan2(dy, dx);
+    float speed = sqrt(dy * dy + dx * dx) / trajectory_discretize_timestep;
+    vector<double> frenet = map->GetFrenet(x, y, yaw);
 
+    state = VehicleState(relative_time, x, y, yaw, speed, frenet[0], frenet[1]);
+
+    x_it++;
+    y_it++;
+    ptsx.push_back(*x_it);
+    ptsx.push_back(x);
+
+    ptsy.push_back(*y_it);
+    ptsy.push_back(y);
+  }
+  else{
+    double prev_car_x = estimate.x - cos(estimate.yaw);
+    double prev_car_y = estimate.y - sin(estimate.yaw);
+
+    ptsx.push_back(prev_car_x);
+    ptsx.push_back(estimate.x);
+
+    ptsy.push_back(prev_car_y);
+    ptsy.push_back(estimate.y);
+
+    state = VehicleState(0, estimate.x, estimate.y, estimate.yaw, estimate.speed, estimate.s, estimate.d);
+  }
+}
+
+vector<PathPoint> __planning__generate_path_point(LocalizationEstimate estimate,
+                                                  VehicleState const& state, vector<float> kinematics,
+                                                  Lane const& target_lane,
+                                                  vector<double>& ptsx, vector<double>& ptsy,
+                                                  const Map * const map){
   float new_s = kinematics[0];
   float new_v = kinematics[1];
   float new_a = kinematics[2];
 
-  vector<double> longitude_jmt = Jmt({estimate.s, estimate.s_dot, 0}, {new_s, new_v, new_a}, planning_time_length);
-  vector<double> latitude_jmt = Jmt({estimate.d, 0, 0}, {current_lane.lane_center_d, 0, 0}, planning_time_length);
+  vector<double> next_wp0 = map->GetXY(state.s + 0.5*(state.speed + new_v) * 1, target_lane.lane_center_d);
+  vector<double> next_wp1 = map->GetXY(state.s + 0.5*(state.speed + new_v) * 1.5, target_lane.lane_center_d);
+  vector<double> next_wp2 = map->GetXY(state.s + 0.5*(state.speed + new_v) * 2, target_lane.lane_center_d);
 
-  int num_timestep = (int)ceil(planning_time_length / trajectory_discretize_timestep);
-  for(int i=1; i<=num_timestep; ++i){
-    //find out s, s_dot, s_dot2, d, d_dot, d_dot2 at time t
-    //find out x, y, yaw, speed, acceleration
-    //the trajectory point is complete
-    float rt = trajectory_discretize_timestep * i;
-    PathPoint path_point;
+  ptsx.push_back(next_wp0[0]);
+  ptsx.push_back(next_wp1[0]);
+  ptsx.push_back(next_wp2[0]);
 
-    vector<double> long_s = Jmt_t(longitude_jmt, rt);
-    vector<double> lat_s = Jmt_t(latitude_jmt, rt);
+  ptsy.push_back(next_wp0[1]);
+  ptsy.push_back(next_wp1[1]);
+  ptsy.push_back(next_wp2[1]);
 
-    path_point.s = long_s[0];
-    path_point.d = lat_s[0];
-    path_point.s_dot = long_s[1];
-    path_point.s_dot2 = long_s[2];
-    path_point.d_dot = lat_s[1];
-    path_point.d_dot2 = lat_s[2];
+  for(int i=0; i<ptsx.size(); ++i){
 
-    vector<double> xy_coord = map->GetXY(long_s[0], lat_s[0], long_s[1], lat_s[1]);
-    path_point.x = xy_coord[0];
-    path_point.y = xy_coord[1];
-    path_point.theta = xy_coord[2];
+    double x_dash, y_dash;
 
-    trajectory.path_point_list.push_back(path_point);
+    ConvertXYToVehicleCoordination(ptsx[i], ptsy[i], state.x, state.y, state.yaw, x_dash, y_dash);
+
+    ptsx[i] = x_dash;
+    ptsy[i] = y_dash;
   }
 
-  FindActualVelocityAndAcceleration(trajectory.path_point_list);
+  tk::spline s;
+
+  s.set_points(ptsx, ptsy);
+
+  vector<PathPoint> path_point_list;
+  float rt = 0;
+
+  if(estimate.previous_path_x.size() > 0)
+    for(int i=0; i<estimate.previous_path_x.size()-1; ++i){
+      rt += trajectory_discretize_timestep;
+      PathPoint path_point;
+      path_point.relative_time = rt;
+      path_point.x = estimate.previous_path_x[i];
+      path_point.y = estimate.previous_path_y[i];
+
+      path_point_list.push_back(path_point);
+    }
+
+  size_t pp = 49-path_point_list.size();
+
+  double target_x = 0.5 * (state.speed + new_v) * pp * trajectory_discretize_timestep;
+  double target_y = s(target_x);
+  double target_distance = sqrt(target_x*target_x + target_y*target_y);
+
+  for(int i=0; i<pp; ++i){
+    rt += trajectory_discretize_timestep;
+    PathPoint path_point;
+
+    double tan_dist = 0.5 * (state.speed + new_v) * (i+1) * trajectory_discretize_timestep;
+    double x_dash = tan_dist / target_distance * target_x;
+    double y_dash = s(x_dash);
+
+    double x_point, y_point;
+
+    ConvertVehicleCoordinateToXY(x_dash, y_dash, state.x, state.y, state.yaw, x_point, y_point);
+
+    path_point.relative_time = rt;
+    path_point.x = x_point;
+    path_point.y = y_point;
+
+    path_point_list.push_back(path_point);
+  }
+
+  return path_point_list;
+}
+
+float __planning__calculate_path_length(vector<PathPoint> const& path_point_list){
+  float path_length =0 ;
+  float prev_x, prev_y, x, y, dx, dy;
+  x = path_point_list[0].x; y=path_point_list[0].y;
+
+  for(vector<PathPoint>::const_iterator it=path_point_list.begin(); it!= path_point_list.end(); ++it){
+    prev_x = x;
+    prev_y = y;
+    x = it->x;
+    y = it->y;
+    dx = x - prev_x; dy = y - prev_y;
+    path_length += sqrt(dx*dx+dy*dy);
+  }
+  return path_length;
+}
+
+Trajectory Planning::KeepLaneTrajectory(LocalizationEstimate const& estimate,
+                                        vector<SensorFusionMessage> const& vehicle_list)
+{
+  Trajectory trajectory;
+  std::ostringstream stringStream;
+  Lane current_lane = map->GetLane(this->target_lane);
+  stringStream << "Keep Lane" << current_lane.lane_id;
+  trajectory.debug_state = stringStream.str();
+  trajectory.state = "KL";
+  trajectory.target_lane = current_lane.lane_id;
+  trajectory.x = estimate.x; trajectory.y = estimate.y; trajectory.yaw = estimate.yaw;
+
+  VehicleState vehicle_state;
+  vector<double> ptsx, ptsy;
+
+  __planning__init_state(estimate, map, vehicle_state, ptsx, ptsy);
+
+  vector<float> kinematics = GetKinematics(vehicle_state, vehicle_list, current_lane.lane_id);
+  trajectory.target_s = kinematics[0]; trajectory.target_v = kinematics[1]; trajectory.target_a = kinematics[2];
+
+  vector<PathPoint> path_point_list = __planning__generate_path_point(estimate, vehicle_state, kinematics, current_lane, ptsx, ptsy, map);
+
+  FindActualVelocityAndAcceleration(path_point_list);
+  trajectory.path_point_list = path_point_list;
+
+  trajectory.total_path_time = trajectory.path_point_list.size() * trajectory_discretize_timestep;
+  trajectory.total_path_length = __planning__calculate_path_length(trajectory.path_point_list);
+
+  /*
+  if(FeasibilityCheck(trajectory))
+    cout <<"Failed feasibility test!!" <<endl;
+  */
 
   return trajectory;
 }
@@ -186,7 +419,6 @@ Trajectory Planning::LaneChangeTrajectory(LocalizationEstimate const& estimate, 
   /*
   Generate a lane change trajectory.
   */
-
   Trajectory trajectory;
   std::ostringstream stringStream;
   Lane current_lane = map->GetLaneByLateralCoord(estimate.d);
@@ -195,56 +427,41 @@ Trajectory Planning::LaneChangeTrajectory(LocalizationEstimate const& estimate, 
   trajectory.debug_state = stringStream.str();
   trajectory.state = state;
   trajectory.target_lane = target_lane_id;
+  trajectory.x = estimate.x; trajectory.y = estimate.y; trajectory.yaw = estimate.yaw;
+
+  VehicleState vehicle_state;
+  vector<double> ptsx, ptsy;
+
+  __planning__init_state(estimate, map, vehicle_state, ptsx, ptsy);
 
   SensorFusionMessage next_lane_vehicle;
-  //Check if a lane change is possible (check if another vehicle occupies that spot).
   for (vector<SensorFusionMessage>::const_iterator it = vehicle_list.begin(); it != vehicle_list.end(); ++it) {
     next_lane_vehicle = *it;
-    if (fabs(next_lane_vehicle.s - estimate.s) < planning_safe_follow_distance && next_lane_vehicle.lane == target_lane_id) {
+    if (fabs(next_lane_vehicle.s - estimate.s) < planning_safe_follow_distance_in_sec*estimate.speed && next_lane_vehicle.lane == target_lane_id) {
       //If lane change is not possible, return empty trajectory.
       return trajectory;
     }
   }
 
-  vector<float> kinematics = GetKinematics(estimate, vehicle_list, target_lane_id);
-  float new_s = kinematics[0];
-  float new_v = kinematics[1];
-  float new_a = kinematics[2];
+  vector<float> kinematics = GetKinematics(vehicle_state, vehicle_list, current_lane.lane_id);
+  trajectory.target_s = kinematics[0]; trajectory.target_v = kinematics[1]; trajectory.target_a = kinematics[2];
 
-  //TODO: test out if 1s is enough for a jerkless path
-  vector<double> longitude_jmt = Jmt({estimate.s, estimate.s_dot, 0}, {new_s, new_v, new_a}, planning_time_length);
-  vector<double> latitude_jmt = Jmt({estimate.d, 0, 0}, {target_lane.lane_center_d, 0, 0}, planning_time_length);
+  vector<PathPoint> path_point_list = __planning__generate_path_point(estimate, vehicle_state, kinematics, target_lane, ptsx, ptsy, map);
 
-  int num_timestep = (int)ceil(planning_time_length / trajectory_discretize_timestep);
-  for(int i=1; i<=num_timestep; ++i){
-    //find out s, s_dot, s_dot2, d, d_dot, d_dot2 at time t
-    //find out x, y, yaw, speed, acceleration
-    //the trajectory point is complete
-    float rt = trajectory_discretize_timestep * i;
-    PathPoint path_point;
+  FindActualVelocityAndAcceleration(path_point_list);
+  trajectory.path_point_list = path_point_list;
 
-    vector<double> long_s = Jmt_t(longitude_jmt, rt);
-    vector<double> lat_s = Jmt_t(latitude_jmt, rt);
+  trajectory.total_path_time = trajectory.path_point_list.size() * trajectory_discretize_timestep;
+  trajectory.total_path_length = __planning__calculate_path_length(trajectory.path_point_list);
 
-    path_point.s = long_s[0];
-    path_point.d = lat_s[0];
-    path_point.s_dot = long_s[1];
-    path_point.s_dot2 = long_s[2];
-    path_point.d_dot = lat_s[1];
-    path_point.d_dot2 = lat_s[2];
-
-    vector<double> xy_coord = map->GetXY(long_s[0], lat_s[0], long_s[1], lat_s[1]);
-    path_point.x = xy_coord[0];
-    path_point.y = xy_coord[1];
-    path_point.theta = xy_coord[2];
-
-    trajectory.path_point_list.push_back(path_point);
-  }
-
-  FindActualVelocityAndAcceleration(trajectory.path_point_list);
+  /*
+  if(FeasibilityCheck(trajectory))
+    cout <<"Failed feasibility test!!" <<endl;
+  */
 
   return trajectory;
 }
+
 
 Trajectory Planning::PrepLaneChangeTrajectory(LocalizationEstimate const& estimate, vector<SensorFusionMessage> const& vehicle_list,
                                               string state, int target_lane_id)
@@ -260,16 +477,22 @@ Trajectory Planning::PrepLaneChangeTrajectory(LocalizationEstimate const& estima
   stringStream << "Prep change lane: current" << current_lane.lane_id << " to: " << target_lane_id;
   trajectory.debug_state = stringStream.str();
   trajectory.state = state;
-  trajectory.target_lane = target_lane_id;
+  trajectory.target_lane = current_lane.lane_id;
+  trajectory.x = estimate.x; trajectory.y = estimate.y; trajectory.yaw = estimate.yaw;
 
+  VehicleState vehicle_state;
+  vector<double> ptsx, ptsy;
+  SensorFusionMessage vehicle_behind;
   float new_s;
   float new_v;
   float new_a;
-  SensorFusionMessage vehicle_behind;
-  vector<float> curr_lane_new_kinematics =
-      GetKinematics(estimate, vehicle_list, current_lane.lane_id);
 
-  if (GetVehicleBehind(estimate, vehicle_list, current_lane.lane_id, vehicle_behind)) {
+  __planning__init_state(estimate, map, vehicle_state, ptsx, ptsy);
+
+  vector<float> curr_lane_new_kinematics =
+      GetKinematics(vehicle_state, vehicle_list, current_lane.lane_id);
+
+  if (GetVehicleBehind(vehicle_state.s, vehicle_list, current_lane.lane_id, vehicle_behind)) {
     //Keep speed of current lane so as not to collide with car behind.
     new_s = curr_lane_new_kinematics[0];
     new_v = curr_lane_new_kinematics[1];
@@ -277,7 +500,7 @@ Trajectory Planning::PrepLaneChangeTrajectory(LocalizationEstimate const& estima
 
   } else {
     vector<float> best_kinematics;
-    vector<float> next_lane_new_kinematics = GetKinematics(estimate, vehicle_list, target_lane_id);
+    vector<float> next_lane_new_kinematics = GetKinematics(vehicle_state, vehicle_list, target_lane_id);
     //Choose kinematics with lowest velocity.
     if (next_lane_new_kinematics[1] < curr_lane_new_kinematics[1]) {
       best_kinematics = next_lane_new_kinematics;
@@ -289,47 +512,26 @@ Trajectory Planning::PrepLaneChangeTrajectory(LocalizationEstimate const& estima
     new_a = best_kinematics[2];
   }
 
-  vector<double> longitude_jmt = Jmt({estimate.s, estimate.s_dot, 0}, {new_s, new_v, new_a}, planning_time_length);
-  vector<double> latitude_jmt = Jmt({estimate.d, 0, 0}, {current_lane.lane_center_d, 0, 0}, planning_time_length);
+  trajectory.target_s = new_s; trajectory.target_v = new_v; trajectory.target_a = new_a;
 
-  int num_timestep = (int)ceil(planning_time_length / trajectory_discretize_timestep);
-  for(int i=1; i<=num_timestep; ++i){
-    //find out s, s_dot, s_dot2, d, d_dot, d_dot2 at time t
-    //find out x, y, yaw, speed, acceleration
-    //the trajectory point is complete
-    float rt = trajectory_discretize_timestep * i;
-    PathPoint path_point;
+  vector<PathPoint> path_point_list = __planning__generate_path_point(estimate, vehicle_state, {new_s, new_v, new_a}, target_lane, ptsx, ptsy, map);
 
-    vector<double> long_s = Jmt_t(longitude_jmt, rt);
-    vector<double> lat_s = Jmt_t(latitude_jmt, rt);
+  FindActualVelocityAndAcceleration(path_point_list);
+  trajectory.path_point_list = path_point_list;
 
-    path_point.s = long_s[0];
-    path_point.d = lat_s[0];
-    path_point.s_dot = long_s[1];
-    path_point.s_dot2 = long_s[2];
-    path_point.d_dot = lat_s[1];
-    path_point.d_dot2 = lat_s[2];
+  trajectory.total_path_time = trajectory.path_point_list.size() * trajectory_discretize_timestep;
+  trajectory.total_path_length = __planning__calculate_path_length(trajectory.path_point_list);
 
-    vector<double> xy_coord = map->GetXY(long_s[0], lat_s[0], long_s[1], lat_s[1]);
-    path_point.x = xy_coord[0];
-    path_point.y = xy_coord[1];
-    path_point.theta = xy_coord[2];
-
-    trajectory.path_point_list.push_back(path_point);
-  }
-
-  FindActualVelocityAndAcceleration(trajectory.path_point_list);
+  /*
+  if(FeasibilityCheck(trajectory))
+    cout <<"Failed feasibility test!!" <<endl;
+  */
 
   return trajectory;
 }
 
-bool Planning::CheckForCollision(Trajectory trajectory)
-{
-  return false;
-}
-
-vector<string> Planning::GetSuccessorStates(LocalizationEstimate const& estimate){
-  Lane lane = map->GetLaneByLateralCoord(estimate.d);
+vector<string> Planning::GetSuccessorStates(int lane_id){
+  Lane lane = map->GetLane(lane_id);
 
   vector<string> states;
 
@@ -340,117 +542,66 @@ vector<string> Planning::GetSuccessorStates(LocalizationEstimate const& estimate
     states.push_back("PLCR");
   } else if (state.compare("PLCL") == 0) {
     states.push_back("KL");
-    if (lane.lane_id != map->lanes_available - 1) {
+    if (lane.lane_id != 0) {
       states.push_back("PLCL");
       states.push_back("LCL");
     }
   } else if (state.compare("PLCR") == 0) {
     states.push_back("KL");
-    if (lane.lane_id != 0) {
+    if (lane.lane_id != map->lanes_available - 1) {
       states.push_back("PLCR");
       states.push_back("LCR");
     }
   } else if (state.compare("LCL") == 0 || state.compare("LCR") == 0){
-      states.push_back(state);
+      states.push_back("KL");
   }
   //If state is "LCL" or "LCR", then just return "KL"
   return states;
 }
 
-bool Planning::GetVehicleBehind(LocalizationEstimate const& estimate,vector<SensorFusionMessage> const& vehicle_list,
-                                int target_lane, SensorFusionMessage & rVehicle){
-  int max_s = -1;
-  bool found_vehicle = false;
-  Lane lane= map->GetLane(target_lane);
+bool Planning::IsCurrentTrackSafe(LocalizationEstimate const& estimate,
+                                  vector<PredictionEstimate> const& predictions){
+  float min = 9999999;
+  float x_ego, y_ego, x_other, y_other, dist;
 
-  SensorFusionMessage temp_vehicle;
-  for (vector<SensorFusionMessage>::const_iterator it = vehicle_list.begin(); it != vehicle_list.end(); ++it) {
-    temp_vehicle = *it;
+  for(int i=0; i<estimate.previous_path_x.size(); ++i){
+    x_ego = estimate.previous_path_x[i];
+    y_ego = estimate.previous_path_x[i];
+    float relative_time = trajectory_discretize_timestep * (i+1);
 
-    float temp_vehicle_s = temp_vehicle.s;
-    if(fabs(temp_vehicle_s - estimate.s) > sensor_fusion_range) {
-      double a = temp_vehicle.s + map->max_s - estimate.s;
-      double b = estimate.s - (temp_vehicle.s - map->max_s);
+    for(int j=0; j<predictions.size(); ++j){
+      if(predictions[j].trajectory.path_point_list.size() > i){
+        x_other = predictions[j].trajectory.path_point_list[i].x;
+        y_other = predictions[j].trajectory.path_point_list[i].y;
 
-      if(a < sensor_fusion_range)
-        temp_vehicle_s = temp_vehicle.s + map->max_s;
-      else
-        temp_vehicle_s = temp_vehicle.s - map->max_s;
-    }
-
-    if (temp_vehicle.lane == lane.lane_id && temp_vehicle_s < estimate.s && temp_vehicle_s > max_s) {
-      max_s = temp_vehicle_s;
-      rVehicle = temp_vehicle;
-      found_vehicle = true;
+        dist = (x_other-x_ego)*(x_other-x_ego) + (y_other-y_ego)*(y_other-y_ego);
+        if(min > dist){
+          min = dist;
+        }
+      }
     }
   }
-  return found_vehicle;
+
+  //if distance smaller than safe follow distance
+  return min > planning_collison_radius;
 }
 
-bool Planning::GetVehicleAhead(LocalizationEstimate const& estimate, vector<SensorFusionMessage> const& vehicle_list,
-                               int target_lane, SensorFusionMessage & rVehicle){
-
-  int min_s = 99999999;
-  bool found_vehicle = false;
-  Lane lane=  map->GetLane(target_lane);
-
-  SensorFusionMessage temp_vehicle;
-  for (vector<SensorFusionMessage>::const_iterator it = vehicle_list.begin(); it != vehicle_list.end(); ++it) {
-    temp_vehicle = *it;
-
-    float temp_vehicle_s = temp_vehicle.s;
-    if(fabs(temp_vehicle_s - estimate.s) > sensor_fusion_range) {
-      double a = temp_vehicle.s + map->max_s - estimate.s;
-      double b = estimate.s - (temp_vehicle.s - map->max_s);
-
-      if(a < sensor_fusion_range)
-        temp_vehicle_s = temp_vehicle.s + map->max_s;
-      else
-        temp_vehicle_s = temp_vehicle.s - map->max_s;
-    }
-
-    if (temp_vehicle.lane == lane.lane_id && temp_vehicle_s > estimate.s && temp_vehicle_s < min_s) {
-      min_s = temp_vehicle_s;
-      rVehicle = temp_vehicle;
-      found_vehicle = true;
-    }
-  }
-  return found_vehicle;
-}
-
-vector<double> Planning::Jmt(vector< double> start, vector <double> end, double t)
-{
-  Eigen::Matrix3f A;
-  Eigen::Vector3f b;
-  A << t*t*t,t*t*t*t,t*t*t*t*t,  3*t*t,4*t*t*t,5*t*t*t*t,  6*t,12*t*t,20*t*t*t;
-  b << end[0]-(start[0]+start[1]*t+0.5*start[2]*t*t), end[1]-(start[1]+start[2]*t), end[2]-start[2];
-  Eigen::Vector3f x = A.colPivHouseholderQr().solve(b);
-
-  return {start[0],start[1],0.5*start[2],x[0],x[1],x[2]};
-}
-
-vector<double> Planning::Jmt_t(vector<double> coeffs, double t)
-{
-  float s = coeffs[0] + coeffs[1]*t + coeffs[2]*t*t + coeffs[3]*t*t*t + coeffs[4]*t*t*t*t + coeffs[5]*t*t*t*t*t;
-  float s_dot = coeffs[1] + 2*coeffs[2]*t + 3*coeffs[3]*t*t + 4*coeffs[4]*t*t*t + 5*coeffs[5]*t*t*t*t;
-  float s_dot2 = 2*coeffs[2] + 6*coeffs[3]*t + 12*coeffs[4]*t*t + 20*coeffs[5]*t*t*t;
-
-  return {s, s_dot, s_dot2};
-}
-
-bool Planning::IsOnTrack(float d, Lane const& lane){
-  return fabs(d - lane.lane_center_d < 1);
-}
-
-float Planning::CalculateCost(Trajectory const& trajectory, vector<PredictionEstimate> const& predictions)
+float Planning::CalculateCost(Trajectory const& trajectory,
+                              vector<SensorFusionMessage> const& vehicle_list,
+                              vector<PredictionEstimate> const& predictions,
+                              vector<float>& cost_breakdown)
 {
   float cost = 0.0;
 
-  cost += planning_cost_acceleration_weight * AccelerationLimitCost(trajectory, vehicle_max_acceleration);
-  cost += planning_cost_speed_limit_weight * SpeedLimitCost(trajectory, vehicle_speed_limit);
-  cost += planning_cost_off_lane_weight * OffTrackCost(trajectory);
-  cost += planning_cost_distance_to_obstacle * DistanceToObstacle(trajectory, predictions);
-  cost += planning_cost_inefficiency_cost * InefficiencyCost(trajectory, vehicle_speed_limit);
+  cost_breakdown.push_back(planning_cost_acceleration_weight * AccelerationLimitCost(trajectory, vehicle_max_acceleration));
+  cost_breakdown.push_back(planning_cost_speed_limit_weight * SpeedLimitCost(trajectory, vehicle_speed_limit));
+  cost_breakdown.push_back(planning_cost_off_lane_weight * OffTrackCost(trajectory));
+  cost_breakdown.push_back(planning_cost_distance_to_obstacle * DistanceToObstacle(trajectory, predictions));
+  cost_breakdown.push_back(planning_cost_inefficiency_cost * InefficiencyCost(trajectory, vehicle_list, vehicle_speed_limit));
+  cost_breakdown.push_back(planning_cost_keep_lane_bonus * KeepLaneBonus(trajectory));
+
+  for(auto it=cost_breakdown.begin(); it != cost_breakdown.end(); ++it)
+    cost += *it;
 
   return cost;
 }
@@ -486,14 +637,25 @@ float Planning::DistanceToObstacle(Trajectory const& trajectory, vector<Predicti
   float min = 9999999;
   float x_ego, y_ego, x_other, y_other, dist;
 
+  int base = 0;
+  float rt = trajectory.path_point_list[0].relative_time;
+  for(int i=0; i<predictions[0].trajectory.path_point_list.size(); ++i){
+    float rt_pred = predictions[0].trajectory.path_point_list[0].relative_time;
+
+    if(fabs(rt_pred - rt) < 1e-6 || rt_pred > rt){
+      base = i;
+      break;
+    }
+  }
+
   for(int i=0; i<trajectory.path_point_list.size(); ++i){
     x_ego = trajectory.path_point_list[i].x;
     y_ego = trajectory.path_point_list[i].y;
 
     for(int j=0; j<predictions.size(); ++j){
       if(predictions[j].trajectory.path_point_list.size() > i){
-        x_other = predictions[j].trajectory.path_point_list[i].x;
-        y_other = predictions[j].trajectory.path_point_list[i].y;
+        x_other = predictions[j].trajectory.path_point_list[i+base].x;
+        y_other = predictions[j].trajectory.path_point_list[i+base].y;
 
         dist = (x_other-x_ego)*(x_other-x_ego) + (y_other-y_ego)*(y_other-y_ego);
         if(min > dist){
@@ -507,8 +669,53 @@ float Planning::DistanceToObstacle(Trajectory const& trajectory, vector<Predicti
   return exp(-max(dist-planning_collison_radius, 0.f));
 }
 
-float Planning::InefficiencyCost(Trajectory const& trajectory, float target_speed)
+float Planning::InefficiencyCost(Trajectory const& trajectory, vector<SensorFusionMessage> const& predictions,
+                                 float target_speed)
 {
+  /*
   float final_speed = trajectory.path_point_list.back().s_dot;
   return 1/(1+exp(-(final_speed-target_speed) * (final_speed-target_speed)));
+   */
+  /*
+  Cost becomes higher for trajectories with intended lane and final lane that have traffic slower than vehicle's target speed.
+  You can use the lane_speed(const map<int, vector<Vehicle>> & predictions, int lane) function to determine the speed
+  for a lane. This function is very similar to what you have already implemented in the "Implement a Second Cost Function in C++" quiz.
+  */
+
+  int intended_lane;
+  if (trajectory.state.compare("PLCL") == 0) {
+    intended_lane = trajectory.target_lane - 1;
+  } else if (trajectory.state.compare("PLCR") == 0) {
+    intended_lane = trajectory.target_lane + 1;
+  } else {
+    intended_lane = trajectory.target_lane;
+  }
+
+  vector<double> frenet = map->GetFrenet(trajectory.x, trajectory.y, trajectory.yaw);
+  SensorFusionMessage rVehicle;
+
+  bool result = GetVehicleAhead(frenet[0], predictions, intended_lane, rVehicle);
+  float proposed_speed_intended, proposed_speed_final;
+  //If no vehicle is in the proposed lane, we can travel at target speed.
+  if (result)
+    proposed_speed_intended = rVehicle.s_dot;
+  else
+    proposed_speed_intended = target_speed;
+
+  result = GetVehicleAhead(frenet[0], predictions, trajectory.target_lane, rVehicle);
+  if (result)
+    proposed_speed_final = rVehicle.s_dot;
+  else
+    proposed_speed_final = target_speed;
+
+  float cost = (2.0*target_speed - proposed_speed_intended - proposed_speed_final)/target_speed;
+
+  return cost;
+}
+
+float Planning::KeepLaneBonus(Trajectory const &trajectory) {
+  if(trajectory.state.compare("KL") == 0)
+    return 0;
+  else
+    return 1;
 }

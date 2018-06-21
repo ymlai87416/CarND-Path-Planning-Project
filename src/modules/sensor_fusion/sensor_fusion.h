@@ -8,6 +8,7 @@
 class SensorFusionMessage{
 
 public:
+  long int timestamp;
   int id;
   float x;
   float y;
@@ -18,7 +19,7 @@ public:
   float d;
   float s_dot;
   float d_dot;
-  float lane;
+  int lane;
 };
 
 #endif //PATH_PLANNING_SENSOR_FUSION_H

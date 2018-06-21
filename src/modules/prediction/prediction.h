@@ -24,12 +24,16 @@ class Prediction {
 public:
   Prediction(Map const* map);
   ~Prediction();
-  bool PredictVehiclesTrajectory(vector<SensorFusionMessage> vehicle_list,
-        vector<PredictionEstimate>& trajectory_list);
+  void OnSensorFusionUpdate(vector<SensorFusionMessage> const& vehicle_list);
+  vector<PredictionEstimate> GetPrediction();
 private:
   Map const* map;
   void initClassifier();
   GNB state_classifier;
+  vector<SensorFusionMessage> vehicle_list_snapshot;
+
+  bool PredictVehiclesTrajectory(vector<SensorFusionMessage> const& vehicle_list,
+                                 vector<PredictionEstimate>& trajectory_list);
 };
 
 

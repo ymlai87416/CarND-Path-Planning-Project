@@ -17,8 +17,22 @@ Prediction::~Prediction()
 
 }
 
+void Prediction::OnSensorFusionUpdate(vector<SensorFusionMessage> const & vehicle_list)
+{
+  this->vehicle_list_snapshot = vehicle_list;
+}
+
+vector<PredictionEstimate> Prediction::GetPrediction(){
+  vector<PredictionEstimate> result;
+
+  if(this->vehicle_list_snapshot.size() > 0)
+    PredictVehiclesTrajectory(this->vehicle_list_snapshot, result);
+
+  return result;
+}
+
 //In the current implementation, I assume that all vehicle is moving forward with ds/dt
-bool Prediction::PredictVehiclesTrajectory(vector<SensorFusionMessage> vehicle_list,
+bool Prediction::PredictVehiclesTrajectory(vector<SensorFusionMessage> const& vehicle_list,
                                            vector<PredictionEstimate>& trajectory_list){
 
   float vehicle_s[3];
@@ -41,6 +55,8 @@ bool Prediction::PredictVehiclesTrajectory(vector<SensorFusionMessage> vehicle_l
     double ref_yaw = vehicle.yaw;
     double ref_speed = vehicle.s_dot;
 
+    bool error = false;
+
     if(fabs(ref_speed) > 1e-6) {
       ptsx.push_back(vehicle.x);
       ptsy.push_back(vehicle.y);
@@ -50,6 +66,8 @@ bool Prediction::PredictVehiclesTrajectory(vector<SensorFusionMessage> vehicle_l
         ptsx.push_back(next_wp[0]);
         ptsy.push_back(next_wp[1]);
       }
+
+      vector<double> ptsx_debug = ptsx;
 
       for (int i = 0; i < ptsx.size(); ++i) {
         double x_dash, y_dash;
@@ -61,64 +79,70 @@ bool Prediction::PredictVehiclesTrajectory(vector<SensorFusionMessage> vehicle_l
 
       tk::spline s;
 
-      s.set_points(ptsx, ptsy);
+      vector<double> frenet_coord;
 
-      double target_x = vehicle.s_dot * prediction_time_length;
-      double target_y = s(target_x);
-      double target_dist = sqrt(target_x * target_x + target_y * target_y);
-      double x_add_on = 0;
-      float cur_time = 0;
+      if(is_sorted(ptsx.begin(), ptsx.end())){
+        s.set_points(ptsx, ptsy);
 
-      double x_point, y_point, x_point_next, y_point_next;
-      double s_, d_, s_next, d_next;
-      x_point_next = vehicle.x;
-      y_point_next = vehicle.y;
-      vector<double> frenet_coord = map->GetFrenet(vehicle.x, vehicle.y, vehicle.yaw);
-      s_next = frenet_coord[0];
-      d_next = frenet_coord[1];
+        double target_x = vehicle.s_dot * prediction_time_length;
+        double target_y = s(target_x);
+        double target_dist = sqrt(target_x * target_x + target_y * target_y);
+        double x_add_on = 0;
+        float cur_time = 0;
 
-      double N = (target_dist / trajectory_discretize_timestep / vehicle.s_dot);
+        double x_point, y_point, x_point_next, y_point_next;
+        double s_, d_, s_next, d_next;
+        x_point_next = vehicle.x;
+        y_point_next = vehicle.y;
+        frenet_coord = map->GetFrenet(vehicle.x, vehicle.y, vehicle.yaw);
+        s_next = frenet_coord[0];
+        d_next = frenet_coord[1];
 
-      //the trajectory must be start at time = 0.02;
-      int step = ceil(prediction_time_length / trajectory_discretize_timestep);
+        double N = (target_dist / trajectory_discretize_timestep / vehicle.s_dot);
 
-      for (int i = 1; i <= step; ++i) {
-        x_point = x_point_next;
-        y_point = y_point_next;
-        s_ = s_next;
-        d_ = d_next;
-        cur_time = trajectory_discretize_timestep * i;
+        //the trajectory must be start at time = 0.02;
+        int step = ceil(prediction_time_length / trajectory_discretize_timestep);
 
-        double x_dash_next, y_dash_next;
-        x_dash_next = x_add_on + (target_x) / N;
-        y_dash_next = s(x_dash_next);
+        for (int i = 1; i <= step; ++i) {
+          x_point = x_point_next;
+          y_point = y_point_next;
+          s_ = s_next;
+          d_ = d_next;
+          cur_time = trajectory_discretize_timestep * i;
 
-        x_add_on = x_dash_next;
+          double x_dash_next, y_dash_next;
+          x_dash_next = x_add_on + (target_x) / N;
+          y_dash_next = s(x_dash_next);
 
-        ConvertVehicleCoordinateToXY(x_dash_next, y_dash_next, ref_x, ref_y, ref_yaw, x_point_next, y_point_next);
+          x_add_on = x_dash_next;
 
-        PathPoint path_point;
-        path_point.x = x_point_next;
-        path_point.y = y_point_next;
-        path_point.s_dot = ref_speed;
-        path_point.d_dot = 0;
-        path_point.relative_time = cur_time;
+          ConvertVehicleCoordinateToXY(x_dash_next, y_dash_next, ref_x, ref_y, ref_yaw, x_point_next, y_point_next);
 
-        estimate.trajectory.path_point_list.push_back(path_point);
+          PathPoint path_point;
+          path_point.x = x_point_next;
+          path_point.y = y_point_next;
+          path_point.s_dot = ref_speed;
+          path_point.d_dot = 0;
+          path_point.relative_time = cur_time;
+
+          estimate.trajectory.path_point_list.push_back(path_point);
+        }
+
+        for (int i = 0; i < estimate.trajectory.path_point_list.size() - 1; ++i) {
+          double dx = estimate.trajectory.path_point_list[i + 1].x - estimate.trajectory.path_point_list[i].x;
+          double dy = estimate.trajectory.path_point_list[i + 1].y - estimate.trajectory.path_point_list[i].y;
+          double yaw = atan2(dy, dx);
+          estimate.trajectory.path_point_list[i].theta = yaw;
+          frenet_coord = map->GetFrenet(estimate.trajectory.path_point_list[i].x,
+                                        estimate.trajectory.path_point_list[i].y, estimate.trajectory.path_point_list[i].theta);
+          estimate.trajectory.path_point_list[i].s = frenet_coord[0];
+          estimate.trajectory.path_point_list[i].d = frenet_coord[1];
+          estimate.trajectory.path_point_list[i].vx = estimate.trajectory.path_point_list[i].s_dot * cos(yaw);
+          estimate.trajectory.path_point_list[i].vy = estimate.trajectory.path_point_list[i].s_dot * sin(yaw);
+        }
       }
-
-      for (int i = 0; i < estimate.trajectory.path_point_list.size() - 1; ++i) {
-        double dx = estimate.trajectory.path_point_list[i + 1].x - estimate.trajectory.path_point_list[i].x;
-        double dy = estimate.trajectory.path_point_list[i + 1].y - estimate.trajectory.path_point_list[i].y;
-        double yaw = atan2(dy, dx);
-        estimate.trajectory.path_point_list[i].theta = yaw;
-        frenet_coord = map->GetFrenet(estimate.trajectory.path_point_list[i].x,
-                                      estimate.trajectory.path_point_list[i].y, estimate.trajectory.path_point_list[i].theta);
-        estimate.trajectory.path_point_list[i].s = frenet_coord[0];
-        estimate.trajectory.path_point_list[i].d = frenet_coord[1];
-        estimate.trajectory.path_point_list[i].vx = estimate.trajectory.path_point_list[i].s_dot * cos(yaw);
-        estimate.trajectory.path_point_list[i].vy = estimate.trajectory.path_point_list[i].s_dot * sin(yaw);
-      }
+      else
+        error = true; //this is a backward path due to car crash, just ignore it.
     }
     else{
       int step = ceil(prediction_time_length / trajectory_discretize_timestep);
@@ -132,7 +156,8 @@ bool Prediction::PredictVehiclesTrajectory(vector<SensorFusionMessage> vehicle_l
       }
     }
 
-    trajectory_list.push_back(estimate);
+    if(!error)
+      trajectory_list.push_back(estimate);
   }
 
   return true;

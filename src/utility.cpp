@@ -3,6 +3,7 @@
 //
 #include "utility.h"
 #include <cmath>
+#include <ctime>
 
 double pi() { return M_PI; }
 double deg2rad(double x) { return x * pi() / 180; }
@@ -24,4 +25,10 @@ void ConvertVehicleCoordinateToXY(double x_dash, double y_dash, const double x_r
 
   x += x_ref;
   y += y_ref;
+}
+
+long int unix_timestamp(){
+  time_t t = std::time(0);
+  long int now = static_cast<long int> (t);
+  return now;
 }

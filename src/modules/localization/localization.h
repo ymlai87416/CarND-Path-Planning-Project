@@ -10,6 +10,9 @@ using namespace std;
 
 class LocalizationEstimate{
 public:
+  float relative_time;
+
+
   float x;
   float y;
   float s;

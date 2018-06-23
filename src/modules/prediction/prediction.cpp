@@ -137,8 +137,7 @@ bool Prediction::PredictVehiclesTrajectory(vector<SensorFusionMessage> const& ve
                                         estimate.trajectory.path_point_list[i].y, estimate.trajectory.path_point_list[i].theta);
           estimate.trajectory.path_point_list[i].s = frenet_coord[0];
           estimate.trajectory.path_point_list[i].d = frenet_coord[1];
-          estimate.trajectory.path_point_list[i].vx = estimate.trajectory.path_point_list[i].s_dot * cos(yaw);
-          estimate.trajectory.path_point_list[i].vy = estimate.trajectory.path_point_list[i].s_dot * sin(yaw);
+          estimate.trajectory.path_point_list[i].v = sqrt(dx*dx+dy*dy) / trajectory_discretize_timestep;
         }
       }
       else

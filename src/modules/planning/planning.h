@@ -26,10 +26,12 @@ public:
   float yaw;
   float speed;
 
+  float a;
+
   VehicleState() {};
 
-  VehicleState(float rt, float x, float y, float yaw, float speed, float s, float d):
-      relative_time(rt), x(x), y(y), yaw(yaw), speed(speed), s(s), d(d){};
+  VehicleState(float rt, float x, float y, float yaw, float speed, float s, float d, float a):
+      relative_time(rt), x(x), y(y), yaw(yaw), speed(speed), s(s), d(d), a(a){};
 };
 
 class TrajectoryCost{
@@ -66,6 +68,7 @@ private:
   Map const * map;
   string state;
   int target_lane;
+  int process_frame;
 
   //trajectory generation
   bool FeasibilityCheck(Trajectory trajectory);
@@ -86,6 +89,7 @@ private:
   float DistanceToObstacle(Trajectory const& trajectory, vector<PredictionEstimate> predictions);
   float InefficiencyCost(Trajectory const& trajectory, vector<SensorFusionMessage> const& predictions, float target_speed);
   float KeepLaneBonus(Trajectory const& trajectory);
+  float ChangeToFreeLaneBouns(Trajectory const &trajectory, vector<SensorFusionMessage> const &predictions);
 };
 
 

@@ -7,8 +7,8 @@ add_definitions(-std=c++11)
 set(CXX_FLAGS "-Wall")
 set(CMAKE_CXX_FLAGS, "${CXX_FLAGS}")
 
-find_package(Curses REQUIRED)
-include_directories(${CURSES_INCLUDE_DIR})
+#find_package(Curses REQUIRED)
+#include_directories(${CURSES_INCLUDE_DIR})
 
 #set(sources src/main.cpp src/spline.h)
 set(sources src/main2.cpp src/spline.h src/modules/map/map.cpp src/modules/map/map.h
@@ -31,4 +31,5 @@ endif(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
 
 add_executable(path_planning ${sources})
 
-target_link_libraries(path_planning z ssl uv uWS ${CURSES_LIBRARY})
+#target_link_libraries(path_planning z ssl uv uWS ${CURSES_LIBRARY})
+target_link_libraries(path_planning z ssl uv uWS)

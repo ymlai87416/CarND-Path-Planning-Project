@@ -25,10 +25,8 @@ public:
   float s_dot2;
   float d_dot2;
 
-  float vx;
-  float vy;
-  float ax;
-  float ay;
+  float v;
+  float a;
 
   PathPoint(){};
 

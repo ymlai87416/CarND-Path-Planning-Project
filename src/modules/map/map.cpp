@@ -44,6 +44,7 @@ void Map::ReadMap(string map_file_, float max_s, int lanes_available)
   }
 
   this->max_s = max_s;
+  this->lanes_available = lanes_available;
 }
 
 vector<double> Map::GetXY(double s, double d) const

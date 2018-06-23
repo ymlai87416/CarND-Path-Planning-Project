@@ -23,7 +23,7 @@
 #include "modules/planning/planning.h"
 
 
-#define ncurses
+#define ncurses_no
 
 #ifdef ncurses
 #include <ncurses.h>
@@ -125,12 +125,14 @@ void displayDrivingConsole(LocalizationEstimate const& estimate,
   attroff(COLOR_PAIR(1));
 
   //latest trajectory state and target lane
-  string best_traj_line = "Best trajectory: state=" + planning_result.best_trajectory.state
-                          + " target line=" + to_string(planning_result.best_trajectory.target_lane)
-                          + " s=" + to_string(planning_result.best_trajectory.target_s)
-                          + " v=" + to_string(planning_result.best_trajectory.target_v)
-                          + " a=" + to_string(planning_result.best_trajectory.target_a)
-                          + "\n";
+  oss << "Best trajectory: state=" << setw(5) << planning_result.best_trajectory.state
+      << setw(8) << " lane = " << setw(3) << planning_result.best_trajectory.target_lane
+      << setw(5) << " s = " << setw(8) << planning_result.best_trajectory.target_s
+      << setw(5) << " v = " << setw(8) << planning_result.best_trajectory.target_v
+      << setw(5) << " a = " << setw(8) << planning_result.best_trajectory.target_a << endl;
+  string best_traj_line = oss.str();
+  oss.str("");
+
   printw(best_traj_line.c_str());
 
 
@@ -138,14 +140,21 @@ void displayDrivingConsole(LocalizationEstimate const& estimate,
   printw("\nScoring\n");
   attroff(COLOR_PAIR(1));
 
-  header = "State\tTotal\tSub 1\tSub 2\tSub 3\tSub 4\tSub 5\tSub 6\n";
+  oss << setiosflags(ios::left)
+      << setw(8) << "State"<< setw(8)  << "Total"<< setw(8)  << "Sub 1"
+      << setw(8) << "Sub 2" << setw(8) << "Sub 3"
+      << setw(8) << "Sub 4" << setw(8) << "Sub 5" << setw(8) << "Sub 6" << setw(8) << "Sub 7" << endl;
+  header = oss.str(); oss.str("");
+  //header = "State\tTotal\tSub 1\tSub 2\tSub 3\tSub 4\tSub 5\tSub 6\n";
   printw(header.c_str());
   std::sort(planning_result.cost.begin(), planning_result.cost.end(), trajectory_cost_by_state);
   for(auto it = planning_result.cost.begin(); it != planning_result.cost.end(); ++it){
-    if(it->sub_score.size() < 6) continue;
-    oss << std::setprecision( 4 ) << it->state << "\t" << it->total_score << "\t" << it->sub_score[0] << "\t"
-        << it->sub_score[1] << "\t" << it->sub_score[2] << "\t" << it->sub_score[3]
-        << "\t" << it->sub_score[4] << "\t" << it->sub_score[5] << "\n";
+    if(it->sub_score.size() < 7) continue;
+
+    oss << std::setprecision(4) << setiosflags(ios::left) << setw(8) << it->state << setw(8) << it->total_score
+        << setw(8) << it->sub_score[0] << setw(8) << it->sub_score[1]
+        << setw(8) << it->sub_score[2] << setw(8) << it->sub_score[3]
+        << setw(8) << it->sub_score[4] << setw(8) << it->sub_score[5] << setw(8) << it->sub_score[6] << endl;
     line = oss.str(); oss.str("");
     printw(line.c_str());
   }
@@ -170,9 +179,11 @@ void displayDrivingConsole(LocalizationEstimate const& estimate,
 
   cout << "Behavior" << endl;
   //latest trajectory state and target lane
-  string best_traj_line = "Best trajectory: state=" + planning_result.best_trajectory.state
-                          + " target line=" + to_string(planning_result.best_trajectory.target_lane);
-  cout << best_traj_line << endl;
+  cout << "Best trajectory: state=" << setw(5) << planning_result.best_trajectory.state
+      << setw(3) << planning_result.best_trajectory.target_lane
+      << setw(5) << " s = " << setw(8) << planning_result.best_trajectory.target_s
+      << setw(5) << " v = " << setw(8) << planning_result.best_trajectory.target_v
+      << setw(5) << " a = " << setw(8) << planning_result.best_trajectory.target_a << endl;
 
   cout << "Scoring" << endl;
   header = "State\tTotal cost\tSub 1\tSub 2\tSub 3\tSub 4\tSub 5\tSub 6\n";
@@ -342,7 +353,7 @@ int main() {
           PlanningResult planning_result = planning.PlanTrajectory();
           Trajectory trajectory = planning_result.best_trajectory;
 
-          displayDrivingConsole(local_estimate, sensor_fusion_messages, planning_result);
+          //displayDrivingConsole(local_estimate, sensor_fusion_messages, planning_result);
 
           vector<double> next_x_vals;
           vector<double> next_y_vals;

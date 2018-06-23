@@ -11,7 +11,7 @@ set(CMAKE_CXX_FLAGS, "${CXX_FLAGS}")
 #include_directories(${CURSES_INCLUDE_DIR})
 
 #set(sources src/main.cpp src/spline.h)
-set(sources src/main2.cpp src/spline.h src/modules/map/map.cpp src/modules/map/map.h
+set(sources src/main.cpp src/spline.h src/modules/map/map.cpp src/modules/map/map.h
         src/utility.h src/utility.cpp src/modules/prediction/classifier.h src/modules/prediction/classifier.cpp
         src/modules/planning/planning.cpp src/modules/planning/planning.h
         src/modules/prediction/prediction.cpp src/modules/prediction/prediction.h
